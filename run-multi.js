@@ -17,12 +17,36 @@ import Persona from './lib/core/Persona.js';
 import ChromeVersions from './lib/chrome/ChromeVersions.js';
 import db, { FIXED_SEARCH } from './lib/db/Database.js';
 import { extractProfileData, extractPreferences } from './lib/utils/profile-extractor.js';
-import { spawn } from 'child_process';
+import { spawn, execSync } from 'child_process';
 import { fileURLToPath } from 'url';
+import os from 'os';
 import fs from 'fs';
 import path from 'path';
 
 const __filename = fileURLToPath(import.meta.url);
+
+// === 호스트명 기반 에이전트 ID 생성 ===
+function getHostname() {
+  // 1. hostname 명령어 우선 (K05 형태)
+  try {
+    const hostname = execSync('hostname', { encoding: 'utf8' }).trim();
+    if (hostname) return hostname;
+  } catch (e) {}
+
+  // 2. os.hostname() 폴백
+  return os.hostname() || 'K00';
+}
+
+/**
+ * 에이전트 ID 생성
+ * @param {number} threadIndex - 스레드 인덱스 (0-based)
+ * @returns {string} - 예: "K05-01", "K05-02"
+ */
+function generateAgentId(threadIndex) {
+  const hostname = getHostname();
+  const threadNum = String(threadIndex + 1).padStart(2, '0');
+  return `${hostname}-${threadNum}`;
+}
 
 // === 설정 ===
 const CONFIG = {
@@ -31,7 +55,7 @@ const CONFIG = {
   search: FIXED_SEARCH,  // 고정 검색어: 아이간식 달빛기정떡
   screenWidth: 1920,
   screenHeight: 1080,
-  baseAgents: ['T00-01', 'T00-02', 'T00-03', 'T00-04', 'T00-05', 'T00-06', 'T00-07']
+  maxThreads: 10  // 최대 스레드 수 (PC 부하 고려)
 };
 
 // CLI 파싱
@@ -535,9 +559,9 @@ async function runParent(config) {
   const chromeVersions = allVersions.slice(0, config.browsers);
   console.log(`\n[Chrome] ${chromeVersions.map(v => v.majorVersion).join(', ')}`);
 
-  // 에이전트 선택
-  const agents = CONFIG.baseAgents.slice(0, config.threads);
-  console.log(`[VPN] ${agents.join(', ')}`);
+  // 에이전트 ID 생성 (hostname 기반)
+  const hostname = getHostname();
+  console.log(`[PC] ${hostname} (스레드 ${config.threads}개)`);
 
   // DB에서 기존 프로필 데이터 로드 (쿠키/스토리지 복원용)
   let profileDataMap = {};  // { 'thread-N/chrome-VER': profileData }
@@ -565,7 +589,7 @@ async function runParent(config) {
 
   try {
     for (let t = 0; t < config.threads; t++) {
-      const agentId = agents[t];
+      const agentId = generateAgentId(t);
       console.log(`\n[${t}] VPN 연결: ${agentId}...`);
 
       const vpn = new VpnManager({
@@ -820,9 +844,9 @@ async function main() {
     const chromeVersions = allVersions.slice(0, config.browsers);
     console.log(`\n[Chrome] ${chromeVersions.map(v => v.majorVersion).join(', ')}`);
 
-    // 에이전트 선택
-    const agents = CONFIG.baseAgents.slice(0, config.threads);
-    console.log(`[VPN] ${agents.join(', ')}`);
+    // 에이전트 ID (hostname 기반)
+    const hostname = getHostname();
+    console.log(`[PC] ${hostname} (스레드 ${config.threads}개)`);
 
     // DB 연결
     await db.connect();
@@ -830,8 +854,9 @@ async function main() {
     // 각 스레드 독립 루프 시작 (await 없이!)
     console.log('\n[시작] 각 스레드 독립 루프 시작...\n');
     for (let t = 0; t < config.threads; t++) {
+      const agentId = generateAgentId(t);
       // 비동기로 시작 (await 없음)
-      runSingleThreadLoop(t, agents[t], config, chromeVersions)
+      runSingleThreadLoop(t, agentId, config, chromeVersions)
         .catch(err => console.error(`[Thread-${t}] 치명적 오류:`, err));
 
       // 스레드 간 시작 간격 (충돌 방지)
