@@ -1,0 +1,21 @@
+{
+  "name": "naver-persona",
+  "version": "1.0.0",
+  "description": "Naver Persona Cookie Aging System - Project Luna Phase 1",
+  "main": "run.js",
+  "type": "module",
+  "scripts": {
+    "start": "node run.js",
+    "dev": "DISPLAY=:0 node run.js",
+    "postinstall": "npx patchright install chromium"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.5.0",
+    "mysql2": "^3.16.0",
+    "patchright": "^1.49.1",
+    "uuid": "^13.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

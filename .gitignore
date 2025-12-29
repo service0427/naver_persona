@@ -1,0 +1,42 @@
+# Dependencies
+node_modules/
+
+# Data and personas (contains sensitive session data)
+data/
+
+# Logs
+logs/
+*.log
+
+# Screenshots and captures
+*.png
+*.jpg
+*.jpeg
+har/
+
+# IDE and editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Claude Code specific
+.claude/
+
+# Environment and secrets
+.env
+.env.*
+*.pem
+*.key
+
+# Chrome profiles (contain encrypted cookies)
+chrome-profiles/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
