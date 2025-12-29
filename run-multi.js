@@ -48,6 +48,53 @@ function generateAgentId(threadIndex) {
   return `${hostname}-${threadNum}`;
 }
 
+// === 프로필 초기화 (쿠키/히스토리만 삭제, 캐시/스토리지 유지) ===
+function resetProfileData(profileDir) {
+  if (!fs.existsSync(profileDir)) {
+    return { reset: false, reason: '폴더 없음' };
+  }
+
+  const defaultDir = path.join(profileDir, 'Default');
+  if (!fs.existsSync(defaultDir)) {
+    return { reset: false, reason: 'Default 없음' };
+  }
+
+  // 삭제할 파일만 (쿠키, 히스토리) - 캐시/스토리지는 유지!
+  const toDelete = [
+    'Cookies',
+    'Cookies-journal',
+    'History',
+    'History-journal',
+    // 아래는 유지 (캐시 공유, 스토리지 재사용)
+    // 'Cache', 'Code Cache', 'GPUCache',
+    // 'Local Storage', 'IndexedDB', 'Session Storage',
+  ];
+
+  let deleted = 0;
+  for (const name of toDelete) {
+    const target = path.join(defaultDir, name);
+    if (fs.existsSync(target)) {
+      try {
+        fs.unlinkSync(target);
+        deleted++;
+      } catch (e) {
+        // 무시
+      }
+    }
+  }
+
+  // SingletonLock 파일 삭제 (이전 세션 잠금 해제)
+  const lockFiles = ['SingletonLock', 'SingletonSocket', 'SingletonCookie'];
+  for (const lock of lockFiles) {
+    const lockPath = path.join(profileDir, lock);
+    if (fs.existsSync(lockPath)) {
+      try { fs.unlinkSync(lockPath); } catch (e) {}
+    }
+  }
+
+  return { reset: true, deleted };
+}
+
 // === 설정 ===
 const CONFIG = {
   threads: parseInt(process.env.THREADS || '3'),        // VPN 스레드 수
@@ -243,15 +290,18 @@ async function runThread(threadId, config, chromeVersions) {
 
     console.log(`[Thread-${threadId}] 완료: ✅${results.success} ⚠️${results.blocked} ❌${results.error}`);
 
-    // [하이브리드 방식] 브라우저 종료 전에 쿠키 추출 (Playwright API - 복호화된 상태로 접근)
-    console.log(`[Thread-${threadId}] 쿠키 추출 (브라우저 종료 전)...`);
-    const cookiesMap = {};  // chromeVersion.fullName -> cookies[]
+    // [하이브리드 방식] 브라우저 종료 전에 storageState 추출 (쿠키 + localStorage)
+    console.log(`[Thread-${threadId}] storageState 추출 (브라우저 종료 전)...`);
+    const storageStateMap = {};  // chromeVersion.fullName -> { cookies, origins }
     for (const session of sessions) {
       try {
         const storageState = await session.context.storageState();
-        cookiesMap[session.chromeVersion.fullName] = storageState.cookies || [];
+        storageStateMap[session.chromeVersion.fullName] = {
+          cookies: storageState.cookies || [],
+          origins: storageState.origins || []  // localStorage 포함
+        };
       } catch (e) {
-        cookiesMap[session.chromeVersion.fullName] = [];
+        storageStateMap[session.chromeVersion.fullName] = { cookies: [], origins: [] };
       }
     }
 
@@ -261,24 +311,26 @@ async function runThread(threadId, config, chromeVersions) {
       try { await s.context.close(); } catch (e) {}
     }
 
-    // 브라우저 종료 후 SQLite에서 히스토리 추출 (쿠키는 위에서 이미 추출)
+    // 브라우저 종료 후 SQLite에서 히스토리 추출 (storageState는 위에서 이미 추출)
     console.log(`[Thread-${threadId}] 히스토리 추출 (브라우저 종료 후)...`);
     const profileDataList = [];
     for (const session of sessions) {
       try {
         const extracted = extractProfileData(session.profileDir);
-        const playwrightCookies = cookiesMap[session.chromeVersion.fullName] || [];
+        const savedState = storageStateMap[session.chromeVersion.fullName] || { cookies: [], origins: [] };
         profileDataList.push({
           threadId,
           chromeVersion: session.chromeVersion.fullName,
           profileDir: session.profileDir,
           vpnIp,  // 사용된 VPN IP
           fingerprint: session.persona.fingerprint,
-          cookies: playwrightCookies,   // Playwright API에서 추출 (복호화됨)
-          history: extracted.history,    // SQLite에서 추출
+          cookies: savedState.cookies,      // Playwright API에서 추출 (복호화됨)
+          origins: savedState.origins,      // localStorage 포함
+          history: extracted.history,       // SQLite에서 추출
           result: session.persona._result
         });
-        console.log(`   ${session.chromeVersion.majorVersion}: 쿠키 ${playwrightCookies.length}개, 히스토리 ${extracted.history.length}개`);
+        const lsCount = savedState.origins.reduce((sum, o) => sum + (o.localStorage?.length || 0), 0);
+        console.log(`   ${session.chromeVersion.majorVersion}: 쿠키 ${savedState.cookies.length}개, localStorage ${lsCount}개, 히스토리 ${extracted.history.length}개`);
       } catch (e) {
         console.log(`   ${session.chromeVersion.majorVersion}: 추출 실패 - ${e.message}`);
       }
@@ -513,32 +565,40 @@ async function runParent(config) {
   console.log(`║         ${config.threads} VPN × ${config.browsers} Chrome = ${config.threads * config.browsers} 브라우저              ║`);
   console.log('╚══════════════════════════════════════════════════════════════╝');
 
-  // --fresh 플래그: 프로필 초기화 (시크릿 모드처럼 새로 시작)
+  // Chrome 버전 미리 로드 (fresh 모드에서 프로필 경로 계산에 필요)
+  const allVersions = ChromeVersions.list();
+  if (allVersions.length < config.browsers) {
+    console.log(`\n❌ Chrome 버전 부족: ${allVersions.length}개 (필요: ${config.browsers}개)`);
+    process.exit(1);
+  }
+  const chromeVersions = allVersions.slice(0, config.browsers);
+
+  // --fresh 플래그: 프로필 초기화 (폴더 유지, 내부 파일만 삭제)
   if (config.fresh) {
-    console.log('\n[Fresh Mode] 프로필 초기화 중...');
+    console.log('\n[Fresh Mode] 프로필 데이터 초기화 중 (폴더 유지)...');
 
-    // 1. 디스크 프로필 디렉토리 삭제
-    try {
-      const dataDir = './data';
-      const entries = fs.readdirSync(dataDir, { withFileTypes: true });
-      let deletedCount = 0;
+    let resetCount = 0;
+    let totalDeleted = 0;
 
-      for (const entry of entries) {
-        if (entry.isDirectory() && entry.name.startsWith('thread-')) {
-          const threadDir = path.join(dataDir, entry.name);
-          fs.rmSync(threadDir, { recursive: true, force: true });
-          deletedCount++;
+    // 각 스레드/브라우저 프로필의 내부 파일만 삭제
+    for (let t = 0; t < config.threads; t++) {
+      for (const cv of chromeVersions) {
+        const profileDir = path.join('./data', `thread-${t}`, cv.fullName);
+        const result = resetProfileData(profileDir);
+        if (result.reset) {
+          resetCount++;
+          totalDeleted += result.deleted;
         }
       }
-
-      if (deletedCount > 0) {
-        console.log(`   ✅ ${deletedCount}개 프로필 디렉토리 삭제`);
-      }
-    } catch (e) {
-      console.log(`   ⚠️ 디렉토리 삭제 실패: ${e.message}`);
     }
 
-    // 2. DB profile_data 테이블 초기화
+    if (resetCount > 0) {
+      console.log(`   ✅ ${resetCount}개 프로필 초기화 (${totalDeleted}개 파일 삭제)`);
+    } else {
+      console.log(`   ℹ️ 초기화할 프로필 없음 (신규 생성 예정)`);
+    }
+
+    // DB profile_data 테이블 초기화
     try {
       await db.connect();
       await db.pool.execute('DELETE FROM profile_data');
@@ -548,15 +608,6 @@ async function runParent(config) {
     }
   }
 
-  // Chrome 버전 준비
-  const allVersions = ChromeVersions.list();
-  if (allVersions.length < config.browsers) {
-    console.log(`\n❌ Chrome 버전 부족: ${allVersions.length}개 (필요: ${config.browsers}개)`);
-    process.exit(1);
-  }
-
-  // 사용할 Chrome 버전 선택 (최신 N개)
-  const chromeVersions = allVersions.slice(0, config.browsers);
   console.log(`\n[Chrome] ${chromeVersions.map(v => v.majorVersion).join(', ')}`);
 
   // 에이전트 ID 생성 (hostname 기반)
@@ -816,21 +867,33 @@ async function main() {
     console.log(`║         ${config.threads} VPN × ${config.browsers} Chrome (각 스레드 독립 실행)     ║`);
     console.log('╚══════════════════════════════════════════════════════════════╝');
 
-    // --fresh 플래그 처리
+    // Chrome 버전 준비
+    const allVersions = ChromeVersions.list();
+    const chromeVersions = allVersions.slice(0, config.browsers);
+
+    // --fresh 플래그 처리 (폴더 유지, 내부 파일만 삭제)
     if (config.fresh) {
-      console.log('\n[Fresh Mode] 프로필 초기화 중...');
-      try {
-        const dataDir = './data';
-        const entries = fs.readdirSync(dataDir, { withFileTypes: true });
-        let deletedCount = 0;
-        for (const entry of entries) {
-          if (entry.isDirectory() && entry.name.startsWith('thread-')) {
-            fs.rmSync(path.join(dataDir, entry.name), { recursive: true, force: true });
-            deletedCount++;
+      console.log('\n[Fresh Mode] 프로필 데이터 초기화 중 (폴더 유지)...');
+
+      let resetCount = 0;
+      let totalDeleted = 0;
+
+      for (let t = 0; t < config.threads; t++) {
+        for (const cv of chromeVersions) {
+          const profileDir = path.join('./data', `thread-${t}`, cv.fullName);
+          const result = resetProfileData(profileDir);
+          if (result.reset) {
+            resetCount++;
+            totalDeleted += result.deleted;
           }
         }
-        if (deletedCount > 0) console.log(`   ✅ ${deletedCount}개 프로필 디렉토리 삭제`);
-      } catch (e) {}
+      }
+
+      if (resetCount > 0) {
+        console.log(`   ✅ ${resetCount}개 프로필 초기화 (${totalDeleted}개 파일 삭제)`);
+      } else {
+        console.log(`   ℹ️ 초기화할 프로필 없음 (신규 생성 예정)`);
+      }
 
       try {
         await db.connect();
@@ -839,9 +902,6 @@ async function main() {
       } catch (e) {}
     }
 
-    // Chrome 버전 준비
-    const allVersions = ChromeVersions.list();
-    const chromeVersions = allVersions.slice(0, config.browsers);
     console.log(`\n[Chrome] ${chromeVersions.map(v => v.majorVersion).join(', ')}`);
 
     // 에이전트 ID (hostname 기반)
