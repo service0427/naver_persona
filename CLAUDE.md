@@ -46,6 +46,19 @@ ip netns exec {namespace} curl https://api.ipify.org
 
 ---
 
+## Project Overview
+
+**naver_persona** (Project Luna Phase 1) - 네이버 쇼핑/플레이스용 페르소나 쿠키 숙성 시스템
+
+다양한 디바이스(Galaxy S23+)를 에뮬레이션하여 신뢰할 수 있는 쿠키를 생성하고 숙성시키는 시스템.
+
+### 현재 상태 (2025-12-30)
+- **Phase 1**: 비로그인 페르소나 생성 및 숙성
+- **페르소나**: 147개 활성 (36/40 코드 조합 커버)
+- **스크롤**: CDP 터치 스크롤 검증 완료 (scrolllog/v2)
+
+---
+
 ## 개발 환경
 
 - **개발 서버**: 원격 서버 (사용자는 AnyDesk로 모니터링)
@@ -61,7 +74,7 @@ DISPLAY=:0 node script.js
 
 ```javascript
 // 올바른 방식
-chromium.launch({
+chromium.launchPersistentContext(profileDir, {
   headless: false,
   args: ['--remote-debugging-port=9222', '--no-sandbox']
 });
@@ -70,69 +83,214 @@ chromium.launch({
 chromium.launch({ headless: true });  // 절대 사용 금지
 ```
 
-## Project Overview
-
-**naver_persona** (Project Luna Phase 1) - 네이버 쇼핑/플레이스용 페르소나 쿠키 숙성 시스템
-
-다양한 디바이스(Galaxy S23+, iPhone 등)를 에뮬레이션하여 신뢰할 수 있는 쿠키를 생성하고 숙성시키는 시스템.
-
-### 타겟
-- 네이버 쇼핑
-- 네이버 플레이스
-
-### 현재 단계
-- Phase 1: 비로그인 페르소나 생성 및 숙성
-
-## Development Setup
-
-```bash
-npm install
-```
-
-Patchright 브라우저는 postinstall에서 자동 설치됨.
-
-## Build and Run Commands
-
-```bash
-npm start           # 메인 실행
-npm test            # 테스트 실행
-```
+---
 
 ## Architecture
 
 ```
 naver_persona/
 ├── lib/
-│   ├── core/           # 핵심 로직 (Persona, VpnThread)
-│   ├── db/             # 데이터베이스 (DatabaseV2 - MariaDB)
-│   ├── devices/        # 디바이스 프로필 & 핑거프린트 모듈
-│   ├── utils/          # StateManager, CookieBackup, HumanSimulator
+│   ├── behavior/       # 행동 시뮬레이션 (핵심!)
+│   │   ├── index.js           # 통합 export
+│   │   ├── AgeProfiles.js     # 나이대별 행동 프로필
+│   │   ├── NaverActions.js    # 네이버 특화 액션
+│   │   ├── CDPTouchScroll.js  # CDP 터치 스크롤 (봇 탐지 우회)
+│   │   └── ScenarioBuilder.js # 시나리오 자동 생성
+│   ├── core/           # 핵심 로직 (ProfileSlot, SessionRunner)
+│   ├── db/             # 데이터베이스 (PersonaDB - MariaDB)
+│   ├── devices/        # 디바이스 프로필 & 핑거프린트
+│   ├── utils/          # StateManager, CookieBackup
 │   └── vpn/            # VPN 클라이언트
-├── tests/              # 테스트 파일
-├── scripts/            # 분석/유틸리티 스크립트
+├── scripts/            # 유틸리티 스크립트
+│   ├── analyze/        # 분석 도구
+│   ├── persona-admin.js       # 페르소나 관리 CLI
+│   └── test-action-library.js # 액션 라이브러리 테스트
 └── docs/               # 문서
 ```
 
-### 핵심 컴포넌트
+---
 
-- **DatabaseV2** (`lib/db/DatabaseV2.js`): 중앙 집중형 멀티PC 아키텍처
-- **StateManager** (`lib/utils/state-manager.js`): 하이브리드 쿠키 백업 (파일 + storageState)
-- **Device Profiles** (`lib/devices/profiles.js`): 모바일/PC 디바이스 에뮬레이션
-- **VPN Client** (`lib/vpn/VpnClient.js`): 네트워크 네임스페이스 기반 VPN 관리
+## 핵심 모듈 사용법
 
-### 데이터베이스 구조 (v2)
+### 1. 행동 시뮬레이션 (lib/behavior/)
 
-```sql
--- 핵심 테이블
-personas_v2        -- 페르소나 마스터 (핑거프린트, 상태)
-persona_state      -- 이식 가능한 상태 (쿠키 파일 백업, storageState)
-execution_logs     -- 실행 로그 (PC/VPN 추적)
-worker_pcs         -- PC 등록/관리
-vpn_pool           -- VPN 풀 관리
-aging_queue        -- 작업 스케줄링 큐
+```javascript
+import {
+  createNaverActions,       // 네이버 특화 액션 팩토리
+  flickScroll,              // CDP 플릭 스크롤
+  naturalBrowseScroll,      // 자연스러운 브라우징 스크롤
+  ScenarioBuilder,          // 시나리오 빌더
+  runPersonaScenario        // 페르소나 기반 시나리오 실행
+} from './lib/behavior/index.js';
+
+// CDP 세션 생성 (터치 스크롤용)
+const cdp = await context.newCDPSession(page);
+
+// 액션 라이브러리 생성
+const actions = createNaverActions(page, '30', cdp);  // 30대 프로필, CDP 활성화
+
+// 검색 실행
+await actions.search.performSearch('노트북 추천');
+
+// CDP 플릭 스크롤 (관성 스크롤)
+await flickScroll(page, cdp, 150, {
+  duration: 100,
+  wobble: true  // X축 흔들림 (5-15px)
+});
+
+// 자연스러운 스크롤
+await naturalBrowseScroll(page, cdp, {
+  totalDistance: 2000,
+  backScrollChance: 0.2,  // 20% 확률로 위로 스크롤
+  pauseChance: 0.3        // 30% 확률로 멈춤
+});
 ```
 
-### 쿠키 관리 전략 (중요!)
+### 2. 페르소나 시나리오 실행
+
+```javascript
+import { runPersonaScenario } from './lib/behavior/index.js';
+
+// 페르소나 정보
+const persona = {
+  code: 'W3M',
+  user_type: 'W',   // Worker
+  age_group: '3',   // 30대
+  gender: 'M'       // 남성
+};
+
+// 시나리오 자동 실행
+const result = await runPersonaScenario(page, persona, {
+  debug: true,
+  cdp  // CDP 세션 (옵션)
+});
+```
+
+### 3. 페르소나 DB
+
+```javascript
+import personaDB from './lib/db/PersonaDB.js';
+
+await personaDB.connect();
+
+// 랜덤 페르소나 생성
+const persona = await personaDB.createRandomPersona('192.168.1.1');
+
+// 활성 페르소나 조회
+const personas = await personaDB.getActivePersonas(10);
+
+// 통계
+const stats = await personaDB.getStats();
+```
+
+---
+
+## 스크롤 동작 (봇 탐지 우회)
+
+### 페이지별 특성
+
+| 페이지 | 관성 스크롤 | 터치:이동 비율 |
+|--------|-------------|----------------|
+| m.naver.com | ❌ 없음 | 1:1 |
+| m.search.naver.com | ✅ 있음 | 1:10~12 |
+
+### CDP 터치 스크롤 (권장)
+
+```javascript
+import { flickScroll, naturalBrowseScroll } from './lib/behavior/CDPTouchScroll.js';
+
+// 검색 결과에서 플릭 스크롤 (관성 동작)
+await flickScroll(page, cdp, 150);  // 150px 터치 → ~1500px 이동
+
+// 메인 페이지에서 자연 스크롤
+await naturalBrowseScroll(page, cdp, { totalDistance: 2000 });
+```
+
+### scrolllog/v2 검증 완료
+- CDP `Input.dispatchTouchEvent` 스크롤이 네이버 scrolllog/v2에 정상 기록됨
+- 상품 노출 시간, 스크롤 패턴 등이 자연스럽게 추적됨
+
+---
+
+## 관리 스크립트
+
+### 페르소나 관리 (persona-admin.js)
+
+```bash
+# 현재 상태
+node scripts/persona-admin.js status
+
+# 활성 페르소나 목록
+node scripts/persona-admin.js list 20
+
+# 코드별/일별 통계
+node scripts/persona-admin.js stats
+
+# 분포 (직업/연령/성별)
+node scripts/persona-admin.js dist
+
+# 누락 조합 확인
+node scripts/persona-admin.js missing
+
+# 만료 페르소나 정리
+node scripts/persona-admin.js cleanup
+```
+
+### 액션 라이브러리 테스트
+
+```bash
+# VPN 네임스페이스 내에서 실행!
+ip netns exec {namespace} env DISPLAY=:0 node scripts/test-action-library.js
+```
+
+---
+
+## 페르소나 코드 체계
+
+### 코드 형식: `{직업}{나이}{성별}`
+
+**직업 (user_type):**
+| 코드 | 설명 | 비중 |
+|------|------|------|
+| W | 직장인 (Worker) | 45% |
+| S | 학생 (Student) | 20% |
+| H | 주부 (Homemaker) | 20% |
+| F | 프리랜서 (Freelancer) | 10% |
+| R | 은퇴자 (Retired) | 5% |
+
+**연령 (age_group):**
+| 코드 | 설명 | 비중 |
+|------|------|------|
+| 2 | 20대 | 25% |
+| 3 | 30대 | 35% |
+| 4 | 40대 | 25% |
+| 5 | 50대+ | 15% |
+
+**성별 (gender):**
+| 코드 | 설명 | 비중 |
+|------|------|------|
+| M | 남성 | 50% |
+| F | 여성 | 50% |
+
+**예시:**
+- `W3M` = 30대 남성 직장인
+- `H4F` = 40대 여성 주부
+- `S2F` = 20대 여성 학생
+
+---
+
+## 데이터베이스 구조
+
+```sql
+-- 핵심 테이블 (PersonaDB)
+personas        -- 페르소나 마스터 (코드, 상태, 통계)
+logs            -- 실행 로그 (결과, IP, 시간)
+
+-- 보조 테이블
+persona_state   -- 쿠키 파일 백업 (storageState)
+```
+
+### 쿠키 관리 전략
 
 ```
 쿠키는 암호화되어 오프라인 복호화 불가 (Chrome 130+)
@@ -142,93 +300,43 @@ aging_queue        -- 작업 스케줄링 큐
 launchPersistentContext 필수! (browser.newContext 사용 금지)
 ```
 
-## Network Architecture
+---
 
-### VPN 관리 (중요!)
+## VPN 관리
 
-- WireGuard 기반 네트워크 네임스페이스 방식 사용
+- WireGuard 기반 네트워크 네임스페이스 방식
 - 7개 VPN 동글 = 7개 스레드 동시 운영
-- API 서버: `http://61.84.75.37:10001` (vpn_coupang_v1 기준)
-
-**절대 주의사항:**
-- 메인 이더넷 인터페이스를 건드리면 안 됨 (서버 접속 끊김)
-- 네트워크 설정 변경 시 극도의 주의 필요
-
-### VPN API 흐름 (실제 사용 경로 - vpn_coupang_v1 기준)
-1. `POST /dongle/allocate` - VPN 할당
-2. `POST /dongle/heartbeat/{id}` - 180초마다 갱신 필수
-3. `POST /dongle/release/{id}` - 작업 완료 후 반납
-4. `POST /dongle/toggle/{id}` - IP 변경 요청
-
-### 네임스페이스 패턴 (vpn_coupang_v1 참조)
-
-```javascript
-// 네임스페이스 이름 형식
-const namespace = `${agentId}-${dongleId}`;  // 예: luna-01-05-031
-
-// WireGuard 인터페이스 이름
-const interfaceName = `wg-${dongleNumber}`;  // 예: wg-05
-
-// IP 주소 형식
-const address = `10.8.${dongleNumber}.0/24`;
-```
+- API 서버: `http://61.84.75.37:10001`
 
 ### VPN 연결 흐름
 
 ```
-1. POST /api/vpn/allocate → dongle 정보 획득
+1. POST /dongle/allocate → dongle 정보 획득
 2. 네임스페이스 생성: ip netns add {namespace}
 3. WireGuard 인터페이스 설정
-4. 네임스페이스 내 IP 확인
-5. ip netns exec {namespace} node script.js 실행
-6. 180초마다 heartbeat 갱신
-7. 작업 완료 시 POST /api/vpn/release
-8. 네임스페이스 정리: ip netns del {namespace}
+4. ip netns exec {namespace} node script.js 실행
+5. 180초마다 heartbeat 갱신
+6. POST /dongle/release → 작업 완료
+7. ip netns del {namespace} → 정리
 ```
 
-### IP 토글 조건 (TogglePolicy)
-
-- `IP_CHECK_FAILED`: IP 확인 실패 시
-- `BLOCKED`: 차단 감지 (score <= -2)
-- `NO_WORK_STREAK`: 연속 3회 작업 없음
-- `PREVENTIVE`: 50회 성공 후 예방적 교체
+---
 
 ## Key Guidelines
 
 ### 개발 원칙
 - ES Modules 사용 (`"type": "module"`)
 - Patchright (Playwright 패치 버전) 사용으로 봇 탐지 우회
-- 페르소나 데이터는 JSON 파일로 1차 관리, 추후 PostgreSQL API 연동
-
-### 디바이스 에뮬레이션
-- `deviceScaleFactor` 필수 설정 (1.0은 PC로 간주됨)
-- 모바일: `isMobile: true`, `hasTouch: true`
+- 모바일 에뮬레이션: `isMobile: true`, `hasTouch: true`
 - locale: `ko-KR`, timezone: `Asia/Seoul` 고정
 
-### 쿠키 관리 (검증 완료)
-
-**결론**: 오프라인 쿠키 복호화 불가 → 파일 백업 방식 사용
-
-```javascript
-// StateManager 사용법
-import StateManager from './lib/utils/state-manager.js';
-import { chromium } from 'patchright';
-
-// 1. 프로필 준비 (DB에서 파일 복원)
-const stateManager = new StateManager(personaId, profileDir);
-await stateManager.prepareProfile();
-
-// 2. launchPersistentContext 필수!
-const context = await chromium.launchPersistentContext(profileDir, {...});
-stateManager.setContext(context);
-
-// 3. 페이지 이동마다 체크포인트
-await page.goto('https://m.naver.com');
-await stateManager.createCheckpoint('after-main', { vpnIp });
-
-// 4. 세션 종료
-await stateManager.finalSave({ vpnIp, result: '성공' });
+### 문서 구조
 ```
-
-- 핵심 쿠키: `NNB`, `NAC`, `NACT`
-- 백업 파일: `Cookies`, `Cookies-journal`, `Local State`
+docs/
+├── PROJECT_LUNA_REFERENCE.md  # 프로젝트 개요
+├── ARCHITECTURE_V3.md         # 아키텍처 상세
+├── PERSONA_RULES.md           # 페르소나 규칙
+├── PERSONA_SCENARIOS.md       # 시나리오 설계
+├── SCROLL_BEHAVIOR.md         # 스크롤 동작 분석 (scrolllog/v2)
+└── ...기타 분석 문서
+```
