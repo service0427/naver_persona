@@ -127,9 +127,9 @@ async function runThread(threadId, config, chromeVersions) {
   // 슬롯 생성 (항상 새 프로필)
   const slots = chromeVersions.map(cv => new ProfileSlot(threadId, cv.fullName));
 
-  // 프로필 디렉토리 초기화
+  // 프로필 디렉토리 전체 초기화 (새 페르소나 - 깨끗한 상태에서 시작)
   for (const slot of slots) {
-    slot.reset();
+    slot.fullReset();
     slot.ensureDir();
   }
 
